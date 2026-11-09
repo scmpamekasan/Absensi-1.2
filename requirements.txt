@@ -1,5 +1,9 @@
 streamlit
-opencv-python-headless
-pillow
 pandas
+opencv-python-headless
+numpy
+piexif
+openpyxl
+pillow
 streamlit-js-eval
+pytz
