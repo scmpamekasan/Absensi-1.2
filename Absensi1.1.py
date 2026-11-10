@@ -7,7 +7,7 @@ from datetime import datetime, time
 from io import BytesIO
 from PIL import Image
 import math
-import pytz  # Library untuk mengatur zona waktu WIB
+import pytz
 
 # Proteksi impor untuk streamlit-js-eval
 try:
@@ -140,24 +140,13 @@ def muat_data_absen():
             FROM absensi
             ORDER BY waktu_presensi DESC
         """, conn)
-    except:
+    except Exception:
         df = pd.DataFrame(columns=[
             "Tanggal", "ID", "Nama", "Waktu Presensi", "Koordinat GPS",
             "Latitude", "Longitude", "Jarak (meter)", "Status", "Perangkat HP/Browser"
         ])
     conn.close()
     return df
-
-def cek_device_sudah_absen(tanggal, device_info):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT nama FROM absensi 
-        WHERE tanggal = ? AND device_info = ?
-    """, (tanggal, device_info))
-    result = cursor.fetchone()
-    conn.close()
-    return result[0] if result else None
 
 def simpan_absen(tanggal, emp_id, nama, waktu_str, koordinat_str, lat, lon, jarak, status, device_info):
     conn = sqlite3.connect(DB_NAME)
@@ -222,10 +211,10 @@ def scan_qr_code(bytes_data):
 
 def parsing_device_info(ua_string):
     if not ua_string:
-        return "Unknown Device"
+        return "Perangkat Tidak Terdeteksi"
     
     ua_lower = ua_string.lower()
-    os_name = "Desktop / PC Lain"
+    os_name = "Desktop / PC"
     browser_name = "Browser Lain"
 
     if "iphone" in ua_lower:
@@ -250,7 +239,7 @@ def parsing_device_info(ua_string):
     elif "firefox" in ua_lower:
         browser_name = "Firefox"
     elif "whatsapp" in ua_lower:
-        browser_name = "WhatsApp In-App Browser"
+        browser_name = "WhatsApp Browser"
 
     return f"{os_name} - {browser_name}"
 
@@ -265,6 +254,13 @@ def to_excel(df):
 # ====================================================
 st.markdown("<h1 style='text-align: center; margin-bottom: 5px;'>Absensi Karyawan Gresik Kota</h1>", unsafe_allow_html=True)
 st.markdown("<p style='text-align: center; color: #64748b; margin-bottom: 30px;'>Sistem Verifikasi Kehadiran Berbasis Geofencing & QR Code Terpadu</p>", unsafe_allow_html=True)
+
+# Tampilkan Notifikasi Sukses/Gagal dari Session State setelah rerun
+if 'notifikasi_sukses' in st.session_state:
+    st.balloons()
+    st.success(st.session_state.pop('notifikasi_sukses'))
+elif 'notifikasi_peringatan' in st.session_state:
+    st.warning(st.session_state.pop('notifikasi_peringatan'))
 
 if not JS_EVAL_AVAILABLE:
     st.error("Library `streamlit-js-eval` belum terinstall di requirements.txt!")
@@ -350,44 +346,36 @@ if st.session_state.get('boleh_scan', False):
             
             info_perangkat = parsing_device_info(user_agent_header)
 
-            # Validasi Proteksi HP Ganda
-            pemilik_sebelumnya = cek_device_sudah_absen(hari_ini, info_perangkat)
+            # Logika Pengecekan Jam Masuk (08:00 WIB)
+            waktu_presensi_jam = waktu_sekarang.time()
             
-            if pemilik_sebelumnya:
-                st.error(f"❌ **Akses Ditolak!** Perangkat HP ini sudah digunakan untuk absensi hari ini atas nama **{pemilik_sebelumnya}**.")
+            if waktu_presensi_jam <= BATAS_JAM_MASUK:
+                status_teks = "Terima Kasih Telah Datang Tepat Waktu"
             else:
-                # --- LOGIKA PENGECEKAN WAKTU MASUK (08.00) ---
-                waktu_presensi_jam = waktu_sekarang.time()
-                
+                status_teks = "Terlambat"
+
+            # Simpan ke Database (Proteksi dibatasi murni pada 1 orang 1x sehari, HP bebas bergantian)
+            berhasil = simpan_absen(
+                hari_ini, emp_id, nama_karyawan, waktu_str, 
+                koordinat_str, user_lat, user_lon, jarak, status_teks, info_perangkat
+            )
+
+            if berhasil:
                 if waktu_presensi_jam <= BATAS_JAM_MASUK:
-                    status_teks = "Terima Kasih Telah Datang Tepat Waktu"
+                    st.session_state['notifikasi_sukses'] = f"🎉 **Terima Kasih Telah Datang Tepat Waktu!**\nAbsensi **{nama_karyawan}** berhasil dicatat pada pukul {waktu_sekarang.strftime('%H:%M:%S')} WIB."
                 else:
-                    status_teks = "Terlambat"
-
-                # Simpan ke Database
-                berhasil = simpan_absen(
-                    hari_ini, emp_id, nama_karyawan, waktu_str, 
-                    koordinat_str, user_lat, user_lon, jarak, status_teks, info_perangkat
-                )
-
-                if berhasil:
-                    if waktu_presensi_jam <= BATAS_JAM_MASUK:
-                        st.balloons()
-                        st.success(f"🎉 **Terima Kasih Telah Datang Tepat Waktu!**\nAbsensi **{nama_karyawan}** berhasil dicatat pada pukul {waktu_sekarang.strftime('%H:%M:%S')} WIB.")
-                    else:
-                        st.warning(f"⚠️ **Terlambat!**\nAbsensi **{nama_karyawan}** berhasil dicatat pada pukul {waktu_sekarang.strftime('%H:%M:%S')} WIB (Melewati jam 08:00).")
-                    
-                    # Reset Total Halaman & Kamera
-                    for key in ["user_lat", "user_lon", "gps_accuracy", "boleh_scan"]:
-                        if key in st.session_state:
-                            del st.session_state[key]
-                    
-                    st.session_state['counter_reset'] += 1
-                    st.rerun()
-                else:
-                    st.warning(f"⚠️ **{nama_karyawan}** sudah melakukan absensi sebelumnya hari ini ({hari_ini}). Data duplikat ditolak.")
+                    st.session_state['notifikasi_peringatan'] = f"⚠️ **Terlambat!**\nAbsensi **{nama_karyawan}** berhasil dicatat pada pukul {waktu_sekarang.strftime('%H:%M:%S')} WIB (Melewati jam 08:00)."
+                
+                # Reset State & Refresh Kamera
+                for key in ["user_lat", "user_lon", "gps_accuracy", "boleh_scan"]:
+                    st.session_state.pop(key, None)
+                
+                st.session_state['counter_reset'] += 1
+                st.rerun()
+            else:
+                st.warning(f"⚠️ **{nama_karyawan}** sudah melakukan absensi sebelumnya hari ini ({hari_ini}). Data duplikat ditolak.")
         else:
-            st.error("❌ **QR Code Tidak Valid!** Pastikan posisi tegak lurus, fokus, dan pencahayaan cukup terang.")
+            st.error("❌ **QR Code Tidak Valid / Tidak Terbaca!** Pastikan posisi tegak lurus, fokus, dan pencahayaan cukup terang.")
 
 # ====================================================
 # 7. PANEL ADMIN (MONITORING & EXPORT)
@@ -441,8 +429,8 @@ if st.session_state.get('konfirmasi_reset', False):
                 conn.commit()
                 conn.close()
                 
-                _ = st.session_state.pop('konfirmasi_reset', None)
-                st.success("🗑️ Seluruh riwayat log absensi berhasil dibersihkan secara permanen!")
+                st.session_state.pop('konfirmasi_reset', None)
+                st.session_state['notifikasi_sukses'] = "🗑️ Seluruh riwayat log absensi berhasil dibersihkan secara permanen!"
                 st.rerun()
             else:
                 st.error("❌ Password Admin salah! Aksi dibatalkan.")
